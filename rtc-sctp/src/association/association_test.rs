@@ -434,6 +434,78 @@ fn test_assoc_handle_init_ack_forward_tsn_supported_param() -> Result<()> {
     Ok(())
 }
 
+// The same parameter in an INIT must have the same effect: an association that accepts one is
+// otherwise left without partial reliability towards a peer that announced it this way only.
+#[test]
+fn test_assoc_handle_init_forward_tsn_supported_param() -> Result<()> {
+    let mut a = create_association(TransportConfig::default());
+    a.set_state(AssociationState::Closed);
+
+    let pkt = Packet {
+        common_header: CommonHeader {
+            source_port: 5001,
+            destination_port: 5002,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let init = ChunkInit {
+        initiate_tag: 123,
+        advertised_receiver_window_credit: 1500,
+        num_outbound_streams: 1,
+        num_inbound_streams: 1,
+        initial_tsn: 123,
+        params: vec![Box::new(ParamForwardTsnSupported)],
+        ..Default::default()
+    };
+
+    a.handle_init(&pkt, &init)?;
+
+    assert!(
+        a.use_forward_tsn,
+        "use_forward_tsn should be set from the ForwardTsnSupported parameter"
+    );
+
+    Ok(())
+}
+
+// An INIT ACK for other ports is ignored, so it must not leave its tag, TSN or window behind
+// for the INIT ACK that does arrive on this association's ports to be measured against.
+#[test]
+fn test_assoc_handle_init_ack_port_mismatch_adopts_nothing() -> Result<()> {
+    let mut a = create_association(TransportConfig::default());
+    let (peer_tag, peer_last_tsn, rwnd) = (a.peer_verification_tag, a.peer_last_tsn, a.rwnd);
+
+    let pkt = Packet {
+        common_header: CommonHeader {
+            source_port: a.destination_port + 1,
+            destination_port: a.source_port,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let init_ack = ChunkInit {
+        is_ack: true,
+        initiate_tag: 123,
+        advertised_receiver_window_credit: 1500,
+        num_outbound_streams: 1,
+        num_inbound_streams: 1,
+        initial_tsn: 456,
+        params: vec![Box::new(ParamStateCookie::new())],
+    };
+
+    let reply = a.handle_init_ack(&pkt, &init_ack, Instant::now())?;
+
+    assert!(reply.is_empty(), "no COOKIE ECHO for an ignored INIT ACK");
+    assert_eq!(a.state(), AssociationState::CookieWait);
+    assert_eq!(
+        (a.peer_verification_tag, a.peer_last_tsn, a.rwnd),
+        (peer_tag, peer_last_tsn, rwnd)
+    );
+
+    Ok(())
+}
+
 // W3C `RTCSctpTransport.maxChannels` is the minimum of the negotiated inbound and outbound
 // stream counts, and is null until the association is established. `handle_init` is where the
 // negotiation happens: the peer's advertised counts narrow this endpoint's configured ones.

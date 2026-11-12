@@ -1044,6 +1044,49 @@ impl Association {
         Ok(())
     }
 
+    /// Takes the peer's half of the association parameters from its INIT or INIT ACK.
+    fn adopt_peer_init(&mut self, i: &ChunkInit) {
+        self.my_max_num_inbound_streams =
+            std::cmp::min(i.num_inbound_streams, self.my_max_num_inbound_streams);
+        self.my_max_num_outbound_streams =
+            std::cmp::min(i.num_outbound_streams, self.my_max_num_outbound_streams);
+        self.peer_verification_tag = i.initiate_tag;
+
+        // 13.2 This is the last TSN received in sequence.  This value
+        // is set initially by taking the peer's initial TSN,
+        // received in the INIT or INIT ACK chunk, and
+        // subtracting one from it.
+        self.peer_last_tsn = i.initial_tsn.wrapping_sub(1);
+
+        // RFC 4960 §7.2.1 (Slow-Start) permits initialising ssthresh to the advertised
+        // receiver window. Left at its initial 0, cwnd never starts below it, slow-start
+        // never runs, and cwnd only grows linearly under congestion avoidance (§7.2.2).
+        self.rwnd = i.advertised_receiver_window_credit;
+        debug!("[{}] initial rwnd={}", self.side, self.rwnd);
+        self.ssthresh = self.rwnd;
+
+        // RFC 3758 announces partial reliability with the Forward-TSN-Supported parameter;
+        // peers that implement RFC 5061 may list FORWARD-TSN in Supported Extensions instead.
+        for param in &i.params {
+            if let Some(v) = param.as_any().downcast_ref::<ParamSupportedExtensions>() {
+                if v.chunk_types.contains(&CT_FORWARD_TSN) {
+                    self.use_forward_tsn = true;
+                }
+            } else if param
+                .as_any()
+                .downcast_ref::<ParamForwardTsnSupported>()
+                .is_some()
+            {
+                self.use_forward_tsn = true;
+            }
+        }
+        if self.use_forward_tsn {
+            debug!("[{}] use ForwardTSN", self.side);
+        } else {
+            warn!("[{}] not using ForwardTSN", self.side);
+        }
+    }
+
     fn handle_init(&mut self, p: &Packet, i: &ChunkInit) -> Result<Vec<Packet>> {
         let state = self.state();
         debug!("[{}] chunkInit received in state '{}'", self.side, state);
@@ -1065,47 +1108,9 @@ impl Association {
         }
 
         // Should we be setting any of these permanently until we've ACKed further?
-        self.my_max_num_inbound_streams =
-            std::cmp::min(i.num_inbound_streams, self.my_max_num_inbound_streams);
-        self.my_max_num_outbound_streams =
-            std::cmp::min(i.num_outbound_streams, self.my_max_num_outbound_streams);
-        self.peer_verification_tag = i.initiate_tag;
+        self.adopt_peer_init(i);
         self.source_port = p.common_header.destination_port;
         self.destination_port = p.common_header.source_port;
-
-        // 13.2 This is the last TSN received in sequence.  This value
-        // is set initially by taking the peer's initial TSN,
-        // received in the INIT or INIT ACK chunk, and
-        // subtracting one from it.
-        self.peer_last_tsn = if i.initial_tsn == 0 {
-            u32::MAX
-        } else {
-            i.initial_tsn - 1
-        };
-
-        // Adopt the peer's advertised receive window and seed ssthresh from it,
-        // mirroring handle_init_ack (and Pion's shared init path). RFC 4960
-        // §7.2.1 (Slow-Start) permits initialising ssthresh to the advertised
-        // receiver window; without this the answerer keeps ssthresh at its
-        // initial 0, so cwnd never starts below it, slow-start never runs, and
-        // cwnd only grows linearly under congestion avoidance (§7.2.2).
-        self.rwnd = i.advertised_receiver_window_credit;
-        debug!("[{}] initial rwnd={}", self.side, self.rwnd);
-        self.ssthresh = self.rwnd;
-
-        for param in &i.params {
-            if let Some(v) = param.as_any().downcast_ref::<ParamSupportedExtensions>() {
-                for t in &v.chunk_types {
-                    if *t == CT_FORWARD_TSN {
-                        debug!("[{}] use ForwardTSN (on init)", self.side);
-                        self.use_forward_tsn = true;
-                    }
-                }
-            }
-        }
-        if !self.use_forward_tsn {
-            warn!("[{}] not using ForwardTSN (on init)", self.side);
-        }
 
         let mut outbound = Packet {
             common_header: CommonHeader {
@@ -1159,16 +1164,6 @@ impl Association {
             return Ok(vec![]);
         }
 
-        self.my_max_num_inbound_streams =
-            std::cmp::min(i.num_inbound_streams, self.my_max_num_inbound_streams);
-        self.my_max_num_outbound_streams =
-            std::cmp::min(i.num_outbound_streams, self.my_max_num_outbound_streams);
-        self.peer_verification_tag = i.initiate_tag;
-        self.peer_last_tsn = if i.initial_tsn == 0 {
-            u32::MAX
-        } else {
-            i.initial_tsn - 1
-        };
         if self.source_port != p.common_header.destination_port
             || self.destination_port != p.common_header.source_port
         {
@@ -1176,14 +1171,8 @@ impl Association {
             return Ok(vec![]);
         }
 
-        self.rwnd = i.advertised_receiver_window_credit;
-        debug!("[{}] initial rwnd={}", self.side, self.rwnd);
-
-        // RFC 4690 Sec 7.2.1
-        //  o  The initial value of ssthresh MAY be arbitrarily high (for
-        //     example, implementations MAY use the size of the receiver
-        //     advertised window).
-        self.ssthresh = self.rwnd;
+        // After the port check, so that an INIT ACK this association ignores changes nothing.
+        self.adopt_peer_init(i);
         trace!(
             "[{}] updated cwnd={} ssthresh={} inflight={} (INI)",
             self.side,
@@ -1195,28 +1184,11 @@ impl Association {
         self.timers.stop(Timer::T1Init);
         self.stored_init = None;
 
-        let mut cookie_param = None;
-        for param in &i.params {
-            if let Some(v) = param.as_any().downcast_ref::<ParamStateCookie>() {
-                cookie_param = Some(v);
-            } else if let Some(v) = param.as_any().downcast_ref::<ParamSupportedExtensions>() {
-                for t in &v.chunk_types {
-                    if *t == CT_FORWARD_TSN {
-                        debug!("[{}] use ForwardTSN (on initAck)", self.side);
-                        self.use_forward_tsn = true;
-                    }
-                }
-            } else if param
-                .as_any()
-                .downcast_ref::<ParamForwardTsnSupported>()
-                .is_some()
-            {
-                self.use_forward_tsn = true;
-            }
-        }
-        if !self.use_forward_tsn {
-            warn!("[{}] not using ForwardTSN (on initAck)", self.side);
-        }
+        let cookie_param = i
+            .params
+            .iter()
+            .filter_map(|param| param.as_any().downcast_ref::<ParamStateCookie>())
+            .last();
 
         if let Some(v) = cookie_param {
             self.stored_cookie_echo = Some(ChunkCookieEcho {
