@@ -40,6 +40,7 @@ use crate::queue::{
     pending_queue::{PendingQueue, ResetMarker},
 };
 use crate::shared::{AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner};
+use crate::snap::{LocalInit, RemoteInit};
 use crate::util::{constant_time_eq, sna16lt, sna32gt, sna32gte, sna32lt, sna32lte};
 use crate::{AssociationEvent, Payload, Side};
 use shared::error::{Error, Result};
@@ -371,6 +372,100 @@ impl Association {
             Side::Client
         };
 
+        // RFC 4960 requires an unpredictable initial TSN. SCTP remains usable without an RTC
+        // crypto provider, so this deliberately uses `rand`'s thread-local CSPRNG.
+        let mut tsn = random::<u32>();
+        if tsn == 0 {
+            tsn += 1;
+        }
+
+        let mut this = Self::unstarted(
+            side,
+            &config,
+            max_payload_size,
+            local_aid,
+            tsn,
+            remote_addr,
+            local_addr,
+            protocol,
+        );
+
+        if side.is_client() {
+            let mut init = ChunkInit {
+                initial_tsn: this.my_next_tsn,
+                num_outbound_streams: this.my_max_num_outbound_streams,
+                num_inbound_streams: this.my_max_num_inbound_streams,
+                initiate_tag: this.my_verification_tag,
+                advertised_receiver_window_credit: this.max_receive_buffer_size,
+                ..Default::default()
+            };
+            init.set_supported_extensions();
+
+            this.set_state(AssociationState::CookieWait);
+            this.stored_init = Some(init);
+            let _ = this.send_init();
+            this.timers
+                .start(Timer::T1Init, now, this.rto_mgr.get_rto());
+        }
+
+        this
+    }
+
+    /// An association established from birth, as if `local` and `peer` had been exchanged as
+    /// INIT and INIT ACK. It queues [`Event::Connected`] and sends nothing.
+    pub(crate) fn new_established(
+        config: Arc<TransportConfig>,
+        max_payload_size: u32,
+        local: LocalInit,
+        peer: &RemoteInit,
+        remote_addr: SocketAddr,
+        local_addr: SocketAddr,
+        protocol: TransportProtocol,
+    ) -> Self {
+        let init = local.into_chunk();
+
+        // Neither peer initiated it. `Client` is the side that waits for no INIT.
+        let mut this = Self::unstarted(
+            Side::Client,
+            &config,
+            max_payload_size,
+            init.initiate_tag,
+            init.initial_tsn,
+            remote_addr,
+            local_addr,
+            protocol,
+        );
+
+        // The peer holds this endpoint to what the INIT advertised, which `config` need
+        // not match.
+        this.max_receive_buffer_size = init.advertised_receiver_window_credit;
+        this.my_max_num_outbound_streams = init.num_outbound_streams;
+        this.my_max_num_inbound_streams = init.num_inbound_streams;
+
+        this.adopt_peer_init(peer.chunk());
+        // No INIT packet arrives to learn the ports from.
+        this.source_port = config.sctp_port();
+        this.destination_port = config.remote_sctp_port();
+
+        this.events.push_back(Event::Connected);
+        this.set_state(AssociationState::Established);
+        this.handshake_completed = true;
+
+        this
+    }
+
+    /// The state common to every way an association begins, before anything is sent.
+    #[allow(clippy::too_many_arguments)]
+    fn unstarted(
+        side: Side,
+        config: &TransportConfig,
+        max_payload_size: u32,
+        local_aid: AssociationId,
+        tsn: u32,
+        remote_addr: SocketAddr,
+        local_addr: SocketAddr,
+        protocol: TransportProtocol,
+    ) -> Self {
         // It's a bit strange, but we're going backwards from the calculation in
         // config.rs to get max_payload_size from INITIAL_MTU.
         let mtu = max_payload_size.saturating_add(COMMON_HEADER_SIZE + DATA_CHUNK_HEADER_SIZE);
@@ -383,14 +478,8 @@ impl Association {
         // min > max) and overflowed near `u32::MAX`, both reachable through
         // `EndpointConfig::max_payload_size` and MTU-derived payload budgets.
         let cwnd = mtu.saturating_mul(2).max(4380).min(mtu.saturating_mul(4));
-        // RFC 4960 requires an unpredictable initial TSN. SCTP remains usable without an RTC
-        // crypto provider, so this deliberately uses `rand`'s thread-local CSPRNG.
-        let mut tsn = random::<u32>();
-        if tsn == 0 {
-            tsn += 1;
-        }
 
-        let mut this = Association {
+        Association {
             side,
             handshake_completed: false,
             max_receive_buffer_size: config.max_receive_buffer_size(),
@@ -418,27 +507,7 @@ impl Association {
             error: None,
 
             ..Default::default()
-        };
-
-        if side.is_client() {
-            let mut init = ChunkInit {
-                initial_tsn: this.my_next_tsn,
-                num_outbound_streams: this.my_max_num_outbound_streams,
-                num_inbound_streams: this.my_max_num_inbound_streams,
-                initiate_tag: this.my_verification_tag,
-                advertised_receiver_window_credit: this.max_receive_buffer_size,
-                ..Default::default()
-            };
-            init.set_supported_extensions();
-
-            this.set_state(AssociationState::CookieWait);
-            this.stored_init = Some(init);
-            let _ = this.send_init();
-            this.timers
-                .start(Timer::T1Init, now, this.rto_mgr.get_rto());
         }
-
-        this
     }
 
     /// Returns application-facing event

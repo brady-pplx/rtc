@@ -20,6 +20,7 @@ use crate::packet::PartialDecode;
 use crate::shared::{
     AssociationEvent, AssociationEventInner, AssociationId, EndpointEvent, EndpointEventInner,
 };
+use crate::snap::{LocalInit, RemoteInit};
 use crate::util::{AssociationIdGenerator, RandomAssociationIdGenerator};
 use shared::{EcnCodepoint, TransportContext, TransportMessage, TransportProtocol};
 
@@ -192,6 +193,50 @@ impl Endpoint {
         Ok((ch, conn))
     }
 
+    /// Start an Association from INIT chunks the peers exchanged out of band
+    ///
+    /// `local` is the INIT the peer was given and `peer` the one it gave. No handshake
+    /// runs: the association is established on return, with [`Event::Connected`] queued,
+    /// and sends nothing until the application does. The peer must start its own the same
+    /// way, since neither answers an INIT.
+    ///
+    /// The SCTP ports are taken from `config`, there being no INIT packet to learn them
+    /// from. Neither peer initiates such an association, and [`Association::side`] reports
+    /// [`Side::Client`](crate::Side::Client) on both.
+    ///
+    /// [`Event::Connected`]: crate::Event::Connected
+    pub fn connect_established(
+        &mut self,
+        config: ClientConfig,
+        remote: SocketAddr,
+        local: LocalInit,
+        peer: &RemoteInit,
+    ) -> Result<(AssociationHandle, Association), ConnectError> {
+        if self.is_full() {
+            return Err(ConnectError::TooManyAssociations);
+        }
+        if remote.port() == 0 {
+            return Err(ConnectError::InvalidRemoteAddress(remote));
+        }
+        // The peer already holds this tag, so unlike `connect` a clash cannot be re-rolled.
+        let local_aid = local.initiate_tag();
+        if self.association_ids.contains_key(&local_aid) {
+            return Err(ConnectError::InitiateTagInUse);
+        }
+
+        let conn = Association::new_established(
+            config.transport,
+            self.endpoint_config.get_max_payload_size(),
+            local,
+            peer,
+            remote,
+            self.local_addr,
+            self.transport_protocol,
+        );
+        let ch = self.register_association(peer.initiate_tag(), local_aid, remote);
+        Ok((ch, conn))
+    }
+
     fn new_aid(&mut self) -> AssociationId {
         loop {
             let aid = self.local_cid_generator.generate_aid();
@@ -283,6 +328,19 @@ impl Endpoint {
             now,
         );
 
+        (
+            self.register_association(remote_aid, local_aid, remote_addr),
+            conn,
+        )
+    }
+
+    /// Routes inbound packets that carry `local_aid` to a new handle.
+    fn register_association(
+        &mut self,
+        remote_aid: AssociationId,
+        local_aid: AssociationId,
+        remote_addr: SocketAddr,
+    ) -> AssociationHandle {
         let id = self.associations.insert(AssociationMeta {
             init_cid: remote_aid,
             cids_issued: 0,
@@ -292,8 +350,7 @@ impl Endpoint {
 
         let ch = AssociationHandle(id);
         self.association_ids.insert(local_aid, ch);
-
-        (ch, conn)
+        ch
     }
 
     /// Unconditionally reject future incoming associations
@@ -387,4 +444,7 @@ pub enum ConnectError {
     /// Use `Endpoint::connect_with` to specify a client configuration.
     #[error("no default client config")]
     NoDefaultClientConfig,
+    /// The initiate tag of the advertised INIT already routes to another association
+    #[error("initiate tag already in use")]
+    InitiateTagInUse,
 }

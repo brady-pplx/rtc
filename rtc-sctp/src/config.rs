@@ -68,6 +68,7 @@ pub enum StreamScheduler {
 #[derive(Debug, Clone)]
 pub struct TransportConfig {
     sctp_port: u16,
+    remote_sctp_port: u16,
     max_receive_buffer_size: u32,
     max_message_size: u32,
     max_num_outbound_streams: u16,
@@ -80,6 +81,7 @@ impl Default for TransportConfig {
     fn default() -> Self {
         TransportConfig {
             sctp_port: 5000,
+            remote_sctp_port: 5000,
             max_receive_buffer_size: INITIAL_RECV_BUF_SIZE,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             max_num_outbound_streams: u16::MAX,
@@ -94,6 +96,16 @@ impl TransportConfig {
     /// Sets the SCTP port. WebRTC always uses 5000.
     pub fn with_sctp_port(mut self, value: u16) -> Self {
         self.sctp_port = value;
+        self
+    }
+
+    /// Sets the peer's SCTP port. WebRTC always uses 5000.
+    ///
+    /// Read by an association started with
+    /// [`Endpoint::connect_established`](crate::Endpoint::connect_established), which sees no
+    /// INIT packet to learn the port from.
+    pub fn with_remote_sctp_port(mut self, value: u16) -> Self {
+        self.remote_sctp_port = value;
         self
     }
 
@@ -137,6 +149,11 @@ impl TransportConfig {
     /// The configured SCTP port.
     pub fn sctp_port(&self) -> u16 {
         self.sctp_port
+    }
+
+    /// The configured SCTP port of the peer.
+    pub fn remote_sctp_port(&self) -> u16 {
+        self.remote_sctp_port
     }
 
     /// The configured receive window in bytes.

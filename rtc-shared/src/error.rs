@@ -1483,6 +1483,9 @@ pub enum Error {
     /// SCTP packet must not have a destination port of 0.
     #[error("sctp packet must not have a destination port of 0")]
     ErrSctpPacketDestinationPortZero,
+    /// Init chunk received out of band is followed by data that is not its padding.
+    #[error("init chunk received out of band is followed by data that is not its padding")]
+    ErrInitChunkTrailingData,
     /// Init chunk must not be bundled with any other chunk.
     #[error("init chunk must not be bundled with any other chunk")]
     ErrInitChunkBundled,

@@ -80,6 +80,9 @@ pub use crate::endpoint::{AssociationHandle, ConnectError, DatagramEvent, Endpoi
 
 mod packet;
 
+mod snap;
+pub use crate::snap::{LocalInit, RemoteInit};
+
 mod shared;
 pub use crate::shared::{AssociationEvent, AssociationId, EndpointEvent};
 
