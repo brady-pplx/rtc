@@ -151,6 +151,7 @@ srtp.workspace = true
 stun.workspace = true
 turn.workspace = true
 
+base64.workspace = true
 bytes.workspace = true
 rustc-hash.workspace = true
 log.workspace = true

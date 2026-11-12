@@ -125,6 +125,36 @@ impl SctpHandlerContext {
     fn observe(&mut self, now: Instant) {
         self.now = now.max(self.now);
     }
+
+    /// Starts the association the descriptions agreed to start without a handshake, if it is
+    /// still to be started, and announces it.
+    ///
+    /// Called on whatever proves DTLS is up; the transport answers once.
+    fn establish_snap_association(&mut self, now: Instant) -> Result<()> {
+        let Some(ch) = self.sctp_transport.establish_snap_association()? else {
+            return Ok(());
+        };
+        // It is established from birth, so its `Connected` is queued already. `handle_read`
+        // reports that event for a handshake, but here no packet need ever arrive first: the
+        // peer may be waiting for this side to send.
+        if let Some(association) = self.sctp_transport.sctp_associations.get_mut(&ch) {
+            while let Some(event) = association.poll() {
+                if let Event::Connected = event {
+                    debug!(
+                        "association_handle {} is connected without a handshake",
+                        ch.0
+                    );
+                    self.event_outs.push_back(TaggedRTCEventInternal {
+                        now,
+                        event: RTCEventInternal::SCTPHandshakeComplete(ch.0),
+                    });
+                    // Its data waits for the event (see `unannounced`).
+                    self.unannounced.insert(ch);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// How many undelivered inbound messages the pipeline may hold before this handler stops
@@ -424,6 +454,11 @@ impl<'a>
                 );
                 return Ok(());
             }
+
+            // A packet that DTLS decrypted proves DTLS is up as well as the event does, and a
+            // driver that reads every datagram before it polls events delivers the peer's
+            // first DATA here ahead of `DTLSHandshakeComplete`.
+            self.ctx.establish_snap_association(now)?;
 
             // Both are read before `sctp_transport` is split up below, which would otherwise
             // conflict with the borrow of `sctp_associations`.
@@ -804,6 +839,8 @@ impl<'a>
         let dtls_complete = matches!(&evt.event, RTCEventInternal::DTLSHandshakeComplete(_, _));
         if dtls_complete {
             debug!("sctp recv dtls handshake complete");
+
+            self.ctx.establish_snap_association(now)?;
 
             if let Some(sctp_transport_config) =
                 self.ctx.sctp_transport.sctp_transport_config.clone()

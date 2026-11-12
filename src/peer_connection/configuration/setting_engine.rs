@@ -300,6 +300,26 @@ impl Default for SctpMaxMessageSize {
     }
 }
 
+/// Whether this endpoint exchanges SCTP INIT chunks in SDP, so the data channel transport
+/// comes up without the SCTP handshake ([SNAP]).
+///
+/// The handshake is skipped only when both peers put an `a=sctp-init` attribute in their
+/// descriptions; with a peer that does not, the SCTP handshake runs as usual. Which of the
+/// two happened is reported by
+/// [`RTCSctpTransport::snap_outcome`](crate::peer_connection::transport::RTCSctpTransport::snap_outcome).
+///
+/// [SNAP]: https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/
+#[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SctpSnapMode {
+    /// Neither advertise an INIT nor read the peer's.
+    #[default]
+    Disabled,
+
+    /// Advertise an INIT in offers, and in answers to offers that carry one.
+    Offer,
+}
+
 /// Advanced configuration engine for fine-tuning WebRTC behavior.
 ///
 /// `SettingEngine` provides granular control over transport-level settings that
@@ -376,6 +396,7 @@ pub struct SettingEngine {
     pub(crate) sctp_mtu: Option<u32>,
     /// SCTP streams share the bytes sent by weight (RFC 8260 section 3.6), off by default.
     pub(crate) sctp_weighted_fair_queueing: bool,
+    pub(crate) sctp_snap: SctpSnapMode,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
 }
@@ -1427,6 +1448,25 @@ impl SettingEngineBuilder {
     /// RFC 8831 section 6.4), each channel's share of the bytes in proportion to its weight.
     pub fn with_sctp_weighted_fair_queueing(mut self, enabled: bool) -> Self {
         self.0.sctp_weighted_fair_queueing = enabled;
+        self
+    }
+
+    /// Chooses whether SCTP INIT chunks are exchanged in SDP so the SCTP handshake can be
+    /// skipped. See [`SctpSnapMode`]; the default is [`SctpSnapMode::Disabled`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rtc::peer_connection::configuration::setting_engine::{
+    ///     SctpSnapMode, SettingEngineBuilder,
+    /// };
+    ///
+    /// let setting_engine = SettingEngineBuilder::new()
+    ///     .with_sctp_snap(SctpSnapMode::Offer)
+    ///     .build();
+    /// ```
+    pub fn with_sctp_snap(mut self, mode: SctpSnapMode) -> Self {
+        self.0.sctp_snap = mode;
         self
     }
 

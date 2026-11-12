@@ -161,6 +161,7 @@ use crate::peer_connection::state::ice_gathering_state::RTCIceGatheringState;
 use crate::peer_connection::transport::dtls::fingerprint::RTCDtlsFingerprint;
 use crate::peer_connection::transport::ice::candidate::RTCIceCandidate;
 use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
+use crate::peer_connection::transport::sctp::snap::{ATTR_KEY_SCTP_INIT, SctpInitAttribute};
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{RTCRtpCodec, RtpCodecKind};
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
@@ -563,6 +564,7 @@ pub(crate) struct AddDataMediaSectionParams {
     dtls_role: ConnectionRole,
     ice_gathering_state: RTCIceGatheringState,
     sctp_max_message_size: usize,
+    sctp_init: Option<SctpInitAttribute>,
 }
 
 pub(crate) fn add_data_media_section(
@@ -610,6 +612,10 @@ pub(crate) fn add_data_media_section(
         params.ice_params.username_fragment,
         params.ice_params.password,
     );
+
+    if let Some(sctp_init) = params.sctp_init {
+        media = media.with_value_attribute(ATTR_KEY_SCTP_INIT.to_owned(), sctp_init.into_value());
+    }
 
     for f in dtls_fingerprints {
         media = media.with_fingerprint(f.algorithm.clone(), f.value.to_uppercase());
@@ -1025,6 +1031,8 @@ pub(crate) struct PopulateSdpParams {
     pub(crate) ice_gathering_state: RTCIceGatheringState,
     pub(crate) match_bundle_group: Option<String>,
     pub(crate) sctp_max_message_size: usize,
+    /// For the data section, if one is written.
+    pub(crate) sctp_init: Option<SctpInitAttribute>,
     pub(crate) ignore_rid_pause_for_recv: bool,
     pub(crate) write_ssrc_attributes_for_simulcast: bool,
 }
@@ -1118,6 +1126,7 @@ impl RTCPeerConnection {
                     dtls_role: params.connection_role,
                     ice_gathering_state: params.ice_gathering_state,
                     sctp_max_message_size: params.sctp_max_message_size,
+                    sctp_init: params.sctp_init.clone(),
                 };
                 d = add_data_media_section(d, &media_dtls_fingerprints, candidates, params)?;
                 true

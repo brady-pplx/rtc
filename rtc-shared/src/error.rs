@@ -2177,6 +2177,18 @@ pub enum Error {
     /// DTLS not established.
     #[error("DTLS not established")]
     ErrSCTPTransportDTLS,
+    /// SDP data section carries more than one `a=sctp-init` attribute.
+    #[error("data section carries more than one a=sctp-init attribute")]
+    ErrSDPSctpInitDuplicated,
+    /// SDP `a=sctp-init` attribute is not base64.
+    #[error("a=sctp-init attribute is not base64")]
+    ErrSDPSctpInitNotBase64,
+    /// SDP `a=sctp-init` attribute differs from the one the SCTP association was agreed on.
+    #[error("a=sctp-init attribute differs from the one the SCTP association was agreed on")]
+    ErrSDPSctpInitChanged,
+    /// SDP `a=sctp-init` attribute added to an SCTP association that was started without one.
+    #[error("a=sctp-init attribute added to an SCTP association that was started without one")]
+    ErrSDPSctpInitUnexpected,
     /// Add_transceiver_SDP called with 0 transceivers.
     #[error("add_transceiver_sdp() called with 0 transceivers")]
     ErrSDPZeroTransceivers,
@@ -2201,6 +2213,9 @@ pub enum Error {
     /// Bad Certificate PEM format.
     #[error("bad Certificate PEM format")]
     ErrCertificatePEMFormatError,
+    /// SCTP association could not be created from the INIT chunks exchanged in SDP.
+    #[error("SCTP association could not be created from the INIT chunks exchanged in SDP")]
+    ErrSCTPAssociationFromInitNotCreated,
     /// SCTP is not established.
     #[error("SCTP is not established")]
     ErrSCTPNotEstablished,

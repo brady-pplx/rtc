@@ -1353,7 +1353,21 @@ impl RTCPeerConnection {
         if remote_description.sdp_type != RTCSdpType::Rollback {
             remote_description.parsed = Some(remote_description.unmarshal()?);
         }
+        // Read before the description is applied, so a bad `a=sctp-init` rejects it whole;
+        // recorded after, so a description refused for another reason leaves no trace. One
+        // with no data section, a rollback included, says the peer advertises none.
+        let peer_sctp_init = match remote_description
+            .parsed
+            .as_ref()
+            .and_then(get_application_media)
+        {
+            Some(data_section) => self.sctp_transport().snap.read_peer_init(data_section)?,
+            None => None,
+        };
         self.set_description(&remote_description, StateChangeOp::SetRemote)?;
+        self.sctp_transport_mut()
+            .snap
+            .record_peer_init(peer_sctp_init);
 
         if let Some(parsed_remote_description) = &remote_description.parsed {
             self.media_engine

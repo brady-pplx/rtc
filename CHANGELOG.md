@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SNAP: data channels can come up without the SCTP handshake**
+  ([draft-hancke-tsvwg-snap](https://datatracker.ietf.org/doc/draft-hancke-tsvwg-snap/)). With
+  `SettingEngineBuilder::with_sctp_snap(SctpSnapMode::Offer)` each peer puts its SCTP INIT chunk
+  in an `a=sctp-init` attribute of the data section, and when both did, the association is
+  established as soon as DTLS is, two round trips sooner. The default, `SctpSnapMode::Disabled`,
+  writes and reads nothing, and a peer that does not answer with the attribute gets the handshake
+  as before. `RTCSctpTransport::snap_outcome` reports which happened and why. A later description
+  must repeat the INIT the association was started from; replacing the association to negotiate
+  a new one is not supported.
+- `rtc_sctp::Endpoint::connect_established` starts an association from a `LocalInit` and the
+  peer's `RemoteInit` with no packets exchanged, for callers that carry the INIT chunks out of
+  band themselves. `TransportConfig::with_remote_sctp_port` sets the peer's port for it.
 - `RTCCrypto::new_hmac` returns a keyed `Mac` whose key schedule is derived once, mirroring the
   existing keyed cipher factories. It replaces the removed one-shot `hmac`/`verify_hmac`.
 - **New `rtc-crypto` crate: a provider-neutral cryptographic API**

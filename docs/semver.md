@@ -33,15 +33,15 @@ The subcrates are in scope for this policy, not an afterthought.
 
 ## Inventory
 
-122 public enums, all with an explicit decision:
+125 public enums, all with an explicit decision:
 
 | Area | `#[non_exhaustive]` | Kept exhaustive |
 |---|---:|---:|
-| `rtc/src` | 34 | 0 |
+| `rtc/src` | 37 | 0 |
 | protocol subcrates | 69 | 19 |
-| **total** | **103** | **19** |
+| **total** | **106** | **19** |
 
-### `rtc/src` — all 34 marked
+### `rtc/src` — all 37 marked
 
 Every directly declared enum in the core is `#[non_exhaustive]`: the W3C-facing state,
 configuration, transport, statistics, event, and message enums. All of these track external

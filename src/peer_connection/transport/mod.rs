@@ -175,6 +175,7 @@ pub use ice::role::RTCIceRole;
 pub use ice::server::RTCIceServer;
 pub use ice::state::RTCIceTransportState;
 
+pub use sctp::snap::{RTCSctpSnapOutcome, RTCSctpSnapUnusedReason};
 pub use sctp::state::RTCSctpTransportState;
 
 use crate::peer_connection::RTCPeerConnection;
@@ -419,6 +420,13 @@ impl<'a> RTCSctpTransport<'a> {
     /// smaller of the negotiated inbound and outbound stream counts.
     pub fn max_channels(&self) -> Option<u16> {
         self.peer_connection.sctp_transport().max_channels()
+    }
+
+    /// Whether the SCTP handshake was skipped because both peers exchanged their INIT
+    /// chunks in SDP. See
+    /// [`SctpSnapMode`](crate::peer_connection::configuration::setting_engine::SctpSnapMode).
+    pub fn snap_outcome(&self) -> RTCSctpSnapOutcome {
+        self.peer_connection.sctp_transport().snap.outcome()
     }
 }
 

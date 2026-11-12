@@ -16,6 +16,7 @@ use crate::peer_connection::transport::ice::candidate::{
     RTCIceCandidate, rtc_ice_candidates_from_ice_candidates,
 };
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
+use crate::peer_connection::transport::sctp::snap::DescriptionRole;
 use crate::peer_connection::transport::{RTCTransportId, TransportKind};
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodec;
@@ -146,7 +147,8 @@ impl RTCPeerConnection {
             sctp_transport_id,
             dtls_transport_id,
         )
-        .with_weighted_fair_queueing(setting_engine.sctp_weighted_fair_queueing);
+        .with_weighted_fair_queueing(setting_engine.sctp_weighted_fair_queueing)
+        .with_snap(setting_engine.sctp_snap);
 
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
@@ -239,6 +241,9 @@ impl RTCPeerConnection {
             return Err(Error::ErrNonCertificate);
         };
 
+        let sctp_init = self
+            .sctp_transport_mut()
+            .sctp_init_attribute(DescriptionRole::Offer);
         let params = PopulateSdpParams {
             media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
             is_ice_lite: self.setting_engine.candidates.ice_lite,
@@ -247,6 +252,7 @@ impl RTCPeerConnection {
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             match_bundle_group: None,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
+            sctp_init,
             ignore_rid_pause_for_recv: false,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine
@@ -384,6 +390,13 @@ impl RTCPeerConnection {
             return Err(Error::ErrNonCertificate);
         };
 
+        // Only an offer adds the sections the remote description does not have.
+        let role = if include_unmatched {
+            DescriptionRole::Offer
+        } else {
+            DescriptionRole::Answer
+        };
+        let sctp_init = self.sctp_transport_mut().sctp_init_attribute(role);
         let params = PopulateSdpParams {
             media_description_fingerprint: self.setting_engine.sdp_media_level_fingerprints,
             is_ice_lite: self.setting_engine.candidates.ice_lite,
@@ -392,6 +405,7 @@ impl RTCPeerConnection {
             ice_gathering_state: self.ice_transport().ice_gathering_state,
             match_bundle_group,
             sctp_max_message_size: self.setting_engine.sctp_max_message_size.as_usize(),
+            sctp_init,
             ignore_rid_pause_for_recv,
             write_ssrc_attributes_for_simulcast: self
                 .setting_engine

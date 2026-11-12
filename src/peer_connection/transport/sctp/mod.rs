@@ -1,14 +1,19 @@
-use crate::peer_connection::configuration::setting_engine::SctpMaxMessageSize;
+use crate::peer_connection::configuration::setting_engine::{SctpMaxMessageSize, SctpSnapMode};
 use crate::peer_connection::transport::RTCTransportId;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::sctp::capabilities::SCTPTransportCapabilities;
+use crate::peer_connection::transport::sctp::snap::{
+    DescriptionRole, SctpInitAttribute, SctpStart, SnapNegotiation,
+};
 use crate::peer_connection::transport::sctp::state::RTCSctpTransportState;
-use sctp::{Association, AssociationHandle};
-use shared::error::Result;
+use log::warn;
+use sctp::{Association, AssociationHandle, ClientConfig};
+use shared::error::{Error, Result};
 use shared::{TransportContext, TransportProtocol};
 use std::collections::HashMap;
 
 pub(crate) mod capabilities;
+pub(crate) mod snap;
 pub(crate) mod state;
 
 /// The stream-count ceiling used when no negotiated value is available yet.
@@ -54,6 +59,9 @@ pub(crate) struct SctpTransport {
     // Streams share the bytes sent by weight (RFC 8260 section 3.6), off by default.
     pub(crate) weighted_fair_queueing: bool,
 
+    // Whether the association starts from INITs exchanged in SDP instead of a handshake.
+    pub(crate) snap: SnapNegotiation,
+
     pub(crate) internal_buffer: Vec<u8>,
 }
 
@@ -78,8 +86,15 @@ impl SctpTransport {
             max_receive_buffer_size,
             mtu,
             weighted_fair_queueing: false,
+            snap: SnapNegotiation::new(SctpSnapMode::default()),
             internal_buffer: vec![],
         }
+    }
+
+    /// Chooses whether descriptions carry this transport's INIT. See [`SctpSnapMode`].
+    pub(crate) fn with_snap(mut self, mode: SctpSnapMode) -> Self {
+        self.snap = SnapNegotiation::new(mode);
+        self
     }
 
     /// Schedules the association `start()` builds by weighted fair queueing.
@@ -146,6 +161,47 @@ impl SctpTransport {
         self.association()?.negotiated_max_streams()
     }
 
+    /// The `a=sctp-init` value for the data section of an offer or answer being written, if
+    /// it is to carry one.
+    pub(crate) fn sctp_init_attribute(
+        &mut self,
+        role: DescriptionRole,
+    ) -> Option<SctpInitAttribute> {
+        // The INIT is written before the peer's description is known, so it advertises only
+        // what does not depend on the negotiation `start()` completes.
+        let config = ::sctp::TransportConfig::default();
+        let config = match self.max_receive_buffer_size {
+            Some(recv_buf) => config.with_max_receive_buffer_size(recv_buf),
+            None => config,
+        };
+        self.snap.local_attribute(role, &config)
+    }
+
+    /// Creates the association both descriptions agreed to start without a handshake.
+    ///
+    /// `None` unless the transport was started on that agreement and has no association
+    /// yet, so the caller may ask on every occasion that proves DTLS is up.
+    pub(crate) fn establish_snap_association(&mut self) -> Result<Option<AssociationHandle>> {
+        let (endpoint, associations) = (&mut self.sctp_endpoint, &mut self.sctp_associations);
+        self.snap.establish(|local, remote, config| {
+            let (handle, association) = endpoint
+                .as_mut()
+                .ok_or(Error::ErrSCTPNotEstablished)?
+                .connect_established(
+                    ClientConfig::new(config),
+                    TransportContext::default().peer_addr,
+                    local,
+                    remote,
+                )
+                .map_err(|err| {
+                    warn!("sctp association not created from the exchanged INITs: {err}");
+                    Error::ErrSCTPAssociationFromInitNotCreated
+                })?;
+            associations.insert(handle, association);
+            Ok(handle)
+        })
+    }
+
     /// Start the SCTPTransport. Since both local and remote parties must mutually
     /// create an SCTPTransport, SCTP SO (Simultaneous Open) is used to establish
     /// a connection over SCTP.
@@ -154,7 +210,7 @@ impl SctpTransport {
         dtls_role: RTCDtlsRole,
         remote_caps: SCTPTransportCapabilities,
         local_port: u16,
-        _remote_port: u16,
+        remote_port: u16,
     ) -> Result<()> {
         if self.is_started {
             return Ok(());
@@ -197,28 +253,31 @@ impl SctpTransport {
         let mut sctp_transport_config = ::sctp::TransportConfig::default()
             .with_max_message_size(max_message_size)
             .with_sctp_port(local_port)
+            .with_remote_sctp_port(remote_port)
             .with_stream_scheduler(scheduler);
         if let Some(recv_buf) = self.max_receive_buffer_size {
             sctp_transport_config = sctp_transport_config.with_max_receive_buffer_size(recv_buf);
         }
-        //TODO: add remote_port support
 
-        if dtls_role == RTCDtlsRole::Client {
-            self.sctp_endpoint = Some(sctp::Endpoint::new(
-                TransportContext::default().local_addr, // placeholder; rewritten per-transmit by the ICE handler
-                TransportProtocol::UDP, // placeholder; rewritten per-transmit by the ICE handler
-                sctp_endpoint_config.into(),
-                None,
-            ));
-            self.sctp_transport_config = Some(sctp_transport_config);
-        } else {
-            self.sctp_endpoint = Some(::sctp::Endpoint::new(
-                TransportContext::default().local_addr, // placeholder; rewritten per-transmit by the ICE handler
-                TransportProtocol::UDP, // placeholder; rewritten per-transmit by the ICE handler
-                sctp_endpoint_config.into(),
+        let (server_config, connect_config) = match self.snap.settle(&sctp_transport_config) {
+            // Neither DTLS role waits for an INIT or sends one: each side creates its
+            // association itself once DTLS is up.
+            SctpStart::ExchangedInits => (None, None),
+            SctpStart::Handshake if dtls_role == RTCDtlsRole::Client => {
+                (None, Some(sctp_transport_config))
+            }
+            SctpStart::Handshake => (
                 Some(::sctp::ServerConfig::new(sctp_transport_config).into()),
-            ));
-        }
+                None,
+            ),
+        };
+        self.sctp_endpoint = Some(::sctp::Endpoint::new(
+            TransportContext::default().local_addr, // placeholder; rewritten per-transmit by the ICE handler
+            TransportProtocol::UDP, // placeholder; rewritten per-transmit by the ICE handler
+            sctp_endpoint_config.into(),
+            server_config,
+        ));
+        self.sctp_transport_config = connect_config;
 
         Ok(())
     }
@@ -370,6 +429,31 @@ mod tests {
                 .max_receive_buffer_size(),
             200_000
         );
+    }
+
+    // The INIT is written before `start()` builds the transport's config, so the setting has
+    // to reach it on its own.
+    #[test]
+    fn the_advertised_init_carries_the_configured_receive_buffer_size() {
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+
+        let mut transport = SctpTransport::new(
+            SctpMaxMessageSize::default(),
+            Some(200_000),
+            None,
+            test_transport_id(TransportKind::Sctp),
+            test_transport_id(TransportKind::Dtls),
+        )
+        .with_snap(SctpSnapMode::Offer);
+
+        let attribute = transport
+            .sctp_init_attribute(DescriptionRole::Offer)
+            .expect("an offer advertises an INIT");
+
+        let chunk = STANDARD.decode(attribute.into_value()).expect("base64");
+        // RFC 9260 section 3.3.2: a_rwnd follows the chunk header and the initiate tag.
+        assert_eq!(chunk[8..12], 200_000u32.to_be_bytes());
     }
 
     #[test]
